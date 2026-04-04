@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/adelos-labs/one-and-done/cliutil"
-	"github.com/adelos-labs/one-and-done/core"
 	"github.com/adelos-labs/one-and-done/keymanagement"
+	"github.com/adelos-labs/one-and-done/onetimepad/metadata"
 )
 
 func main() {
@@ -37,34 +38,33 @@ func main() {
 
 func encipher(keyFile, message string) {
 	plaintext := []byte(message)
-	key, remaining, err := keymanagement.ConsumeKey(keyFile, len(plaintext))
-	if err != nil {
-		cliutil.Die("%v", err)
-	}
-	defer clear(key)
 
-	cipher, err := core.Encipher(plaintext, key)
+	keyLen, cipher, remaining, err := metadata.Encipher(keyFile, plaintext)
 	if err != nil {
 		cliutil.Die("%v", err)
 	}
 
-	fmt.Println(base64.StdEncoding.EncodeToString(cipher))
+	fmt.Printf("%d:%s\n", keyLen, base64.StdEncoding.EncodeToString(cipher))
 	printKeyStatus(keyFile, remaining)
 }
 
 func decipher(keyFile, encoded string) {
-	cipher, err := base64.StdEncoding.DecodeString(encoded)
+	parts := strings.SplitN(encoded, ":", 2)
+	if len(parts) != 2 {
+		cliutil.Die("invalid message format: expected keylen:base64")
+	}
+
+	keyLen, err := strconv.Atoi(parts[0])
+	if err != nil {
+		cliutil.Die("invalid key length %q: %v", parts[0], err)
+	}
+
+	cipher, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
 		cliutil.Die("invalid base64: %v", err)
 	}
 
-	key, remaining, err := keymanagement.ConsumeKey(keyFile, len(cipher))
-	if err != nil {
-		cliutil.Die("%v", err)
-	}
-	defer clear(key)
-
-	plaintext, err := core.Decipher(cipher, key)
+	plaintext, remaining, err := metadata.Decipher(keyFile, keyLen, cipher)
 	if err != nil {
 		cliutil.Die("%v", err)
 	}

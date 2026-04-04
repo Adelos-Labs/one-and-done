@@ -113,13 +113,23 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	if err := encCmd.Run(); err != nil {
 		t.Fatalf("encipher failed: %v", err)
 	}
-	ciphertext := strings.TrimSpace(encStdout.String())
-	if ciphertext == "" {
+	envelope := strings.TrimSpace(encStdout.String())
+	if envelope == "" {
 		t.Fatal("encipher produced empty output")
 	}
-	if ciphertext == message {
-		t.Error("ciphertext should differ from plaintext")
+	// Output should be keylen:base64
+	parts := strings.SplitN(envelope, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected keylen:base64 format, got %q", envelope)
 	}
+	keyLen, err := strconv.Atoi(parts[0])
+	if err != nil {
+		t.Fatalf("invalid key length in output: %v", err)
+	}
+	if keyLen != 64 {
+		t.Errorf("key length = %d, want 64", keyLen)
+	}
+	ciphertext := envelope
 
 	// Verify sender's key was partially consumed.
 	senderRemaining, err := os.ReadFile(senderKey)
@@ -215,7 +225,7 @@ func TestCLI_MissingKeyFile(t *testing.T) {
 		args []string
 	}{
 		{"encipher", []string{"encipher", missing, "hello"}},
-		{"decipher", []string{"decipher", missing, "aGVsbG8="}},
+		{"decipher", []string{"decipher", missing, "100:aGVsbG8="}},
 	} {
 		out, err := exec.Command(bin, tt.args...).CombinedOutput()
 		if err == nil {
@@ -241,7 +251,7 @@ func TestCLI_KeyTooShort(t *testing.T) {
 		args []string
 	}{
 		{"encipher", []string{"encipher", keyFile, "hello world"}},
-		{"decipher", []string{"decipher", keyFile, "aGVsbG8gd29ybGQ="}},
+		{"decipher", []string{"decipher", keyFile, "1:aGVsbG8gd29ybGQ="}},
 	} {
 		out, err := exec.Command(bin, tt.args...).CombinedOutput()
 		if err == nil {
@@ -296,11 +306,91 @@ func TestCLI_DecipherInvalidBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command(bin, "decipher", keyFile, "not-valid-base64!!!").CombinedOutput()
+	out, err := exec.Command(bin, "decipher", keyFile, "3:not-valid-base64!!!").CombinedOutput()
 	if err == nil {
 		t.Fatal("expected failure for invalid base64")
 	}
 	if !strings.Contains(string(out), "invalid base64") {
 		t.Errorf("unexpected error message: %s", out)
+	}
+}
+
+func TestCLI_DecipherInvalidFormat(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "test.key")
+	if err := os.WriteFile(keyFile, []byte("key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "decipher", keyFile, "no-colon-here").CombinedOutput()
+	if err == nil {
+		t.Fatal("expected failure for missing keylen prefix")
+	}
+	if !strings.Contains(string(out), "invalid message format") {
+		t.Errorf("unexpected error message: %s", out)
+	}
+}
+
+func TestCLI_OutOfOrderDetected(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	senderKey := filepath.Join(dir, "sender.key")
+	receiverKey := filepath.Join(dir, "receiver.key")
+
+	// Generate key and copy to receiver.
+	out, err := exec.Command(bin, "genkey", senderKey, "64").CombinedOutput()
+	if err != nil {
+		t.Fatalf("genkey: %v\n%s", err, out)
+	}
+	keyData, _ := os.ReadFile(senderKey)
+	os.WriteFile(receiverKey, keyData, 0600)
+
+	// Send two messages.
+	enc1 := exec.Command(bin, "encipher", senderKey, "first")
+	var out1 bytes.Buffer
+	enc1.Stdout = &out1
+	if err := enc1.Run(); err != nil {
+		t.Fatalf("encipher first: %v", err)
+	}
+	msg1 := strings.TrimSpace(out1.String())
+
+	enc2 := exec.Command(bin, "encipher", senderKey, "second")
+	var out2 bytes.Buffer
+	enc2.Stdout = &out2
+	if err := enc2.Run(); err != nil {
+		t.Fatalf("encipher second: %v", err)
+	}
+	msg2 := strings.TrimSpace(out2.String())
+
+	// Try to decipher second message first — should fail with mismatch error.
+	decOut, err := exec.Command(bin, "decipher", receiverKey, msg2).CombinedOutput()
+	if err == nil {
+		t.Fatal("expected error deciphering out-of-order message")
+	}
+	if !strings.Contains(string(decOut), "key length mismatch") {
+		t.Errorf("expected key length mismatch error, got: %s", decOut)
+	}
+
+	// Decipher first message — should succeed.
+	dec1 := exec.Command(bin, "decipher", receiverKey, msg1)
+	var dec1Out bytes.Buffer
+	dec1.Stdout = &dec1Out
+	if err := dec1.Run(); err != nil {
+		t.Fatalf("decipher first: %v", err)
+	}
+	if got := strings.TrimSpace(dec1Out.String()); got != "first" {
+		t.Errorf("first message = %q, want %q", got, "first")
+	}
+
+	// Now second message should succeed.
+	dec2 := exec.Command(bin, "decipher", receiverKey, msg2)
+	var dec2Out bytes.Buffer
+	dec2.Stdout = &dec2Out
+	if err := dec2.Run(); err != nil {
+		t.Fatalf("decipher second: %v", err)
+	}
+	if got := strings.TrimSpace(dec2Out.String()); got != "second" {
+		t.Errorf("second message = %q, want %q", got, "second")
 	}
 }
