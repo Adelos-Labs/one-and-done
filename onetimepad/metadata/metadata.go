@@ -1,66 +1,97 @@
 package metadata
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/adelos-labs/one-and-done/onetimepad/message"
 	"github.com/adelos-labs/one-and-done/keymanagement"
+	"github.com/adelos-labs/one-and-done/onetimepad/message"
 )
 
-// Encipher encrypts plaintext using key material consumed from keyFile.
-// It returns the key file length before encryption (so the recipient can
-// verify message ordering), the ciphertext, and the number of key bytes
-// still available.
-func Encipher(keyFile string, plaintext []byte) (keyLen int, ciphertext []byte, remaining int, err error) {
+type envelope struct {
+	Message string `json:"m"`
+	KeyID   string `json:"k_id"`
+	KeyLen  int    `json:"k_len"`
+}
+
+// Encipher encrypts plaintext and returns a base64-encoded JSON envelope
+// containing the ciphertext, key ID, and key file length (for ordering).
+func Encipher(keyFile, keyID string, plaintext []byte) (string, int, error) {
 	info, err := os.Stat(keyFile)
 	if err != nil {
-		return 0, nil, 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
+		return "", 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
 	}
-	keyLen = int(info.Size())
+	keyLen := int(info.Size())
 
 	key, remaining, err := keymanagement.ConsumeKey(keyFile, len(plaintext))
 	if err != nil {
-		return 0, nil, 0, err
+		return "", 0, err
 	}
 	defer clear(key)
 
-	ciphertext, err = message.Encipher(plaintext, key)
+	ciphertext, err := message.Encipher(plaintext, key)
 	if err != nil {
-		return 0, nil, 0, err
+		return "", 0, err
 	}
 
-	return keyLen, ciphertext, remaining, nil
+	env := envelope{
+		Message: base64.StdEncoding.EncodeToString(ciphertext),
+		KeyID:   keyID,
+		KeyLen:  keyLen,
+	}
+
+	jsonBytes, err := json.Marshal(env)
+	if err != nil {
+		return "", 0, fmt.Errorf("error encoding envelope: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(jsonBytes), remaining, nil
 }
 
-// Decipher decrypts ciphertext using key material consumed from keyFile.
-// keyLen is the key file length reported by the sender at encryption time.
-// If it does not match the receiver's current key file length, the message
-// is out of order and decryption is refused.
-func Decipher(keyFile string, keyLen int, ciphertext []byte) (plaintext []byte, remaining int, err error) {
+// Decipher decodes a base64-encoded JSON envelope and decrypts the message.
+// It validates that the envelope's key length matches the current key file,
+// refusing to decrypt if messages are out of order.
+func Decipher(keyFile, encoded string) (plaintext []byte, keyID string, remaining int, err error) {
+	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("invalid envelope encoding: %w", err)
+	}
+
+	var env envelope
+	if err := json.Unmarshal(jsonBytes, &env); err != nil {
+		return nil, "", 0, fmt.Errorf("invalid envelope format: %w", err)
+	}
+
+	ciphertext, err := base64.StdEncoding.DecodeString(env.Message)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("invalid ciphertext encoding: %w", err)
+	}
+
 	info, err := os.Stat(keyFile)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
+		return nil, "", 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
 	}
 	currentLen := int(info.Size())
 
-	if currentLen != keyLen {
-		return nil, 0, fmt.Errorf(
+	if currentLen != env.KeyLen {
+		return nil, "", 0, fmt.Errorf(
 			"key length mismatch: message expects %d bytes but key file has %d bytes (messages may be out of order)",
-			keyLen, currentLen,
+			env.KeyLen, currentLen,
 		)
 	}
 
 	key, remaining, err := keymanagement.ConsumeKey(keyFile, len(ciphertext))
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 	defer clear(key)
 
 	plaintext, err = message.Decipher(ciphertext, key)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 
-	return plaintext, remaining, nil
+	return plaintext, env.KeyID, remaining, nil
 }

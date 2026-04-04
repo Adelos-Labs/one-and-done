@@ -1,8 +1,11 @@
 package metadata_test
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/adelos-labs/one-and-done/keymanagement"
@@ -39,28 +42,59 @@ func TestRoundtrip(t *testing.T) {
 	receiverKey := filepath.Join(dir, "receiver.key")
 	copyFile(t, senderKey, receiverKey)
 
-	message := []byte("hello world")
+	msg := []byte("hello world")
 
-	keyLen, ciphertext, remaining, err := metadata.Encipher(senderKey, message)
+	envelope, remaining, err := metadata.Encipher(senderKey, "test-key", msg)
 	if err != nil {
 		t.Fatalf("Encipher: %v", err)
 	}
-	if keyLen != 64 {
-		t.Errorf("keyLen = %d, want 64", keyLen)
-	}
-	if remaining != 64-len(message) {
-		t.Errorf("remaining = %d, want %d", remaining, 64-len(message))
+	if remaining != 64-len(msg) {
+		t.Errorf("remaining = %d, want %d", remaining, 64-len(msg))
 	}
 
-	plaintext, remaining, err := metadata.Decipher(receiverKey, keyLen, ciphertext)
+	plaintext, keyID, remaining, err := metadata.Decipher(receiverKey, envelope)
 	if err != nil {
 		t.Fatalf("Decipher: %v", err)
 	}
 	if string(plaintext) != "hello world" {
 		t.Errorf("plaintext = %q, want %q", plaintext, "hello world")
 	}
-	if remaining != 64-len(message) {
-		t.Errorf("remaining = %d, want %d", remaining, 64-len(message))
+	if keyID != "test-key" {
+		t.Errorf("keyID = %q, want %q", keyID, "test-key")
+	}
+	if remaining != 64-len(msg) {
+		t.Errorf("remaining = %d, want %d", remaining, 64-len(msg))
+	}
+}
+
+func TestEnvelopeFormat(t *testing.T) {
+	dir := t.TempDir()
+	senderKey := writeTestKey(t, dir, "sender.key", 64)
+
+	envelope, _, err := metadata.Encipher(senderKey, "my-key", []byte("hi"))
+	if err != nil {
+		t.Fatalf("Encipher: %v", err)
+	}
+
+	// Envelope should be valid base64.
+	jsonBytes, err := base64.StdEncoding.DecodeString(envelope)
+	if err != nil {
+		t.Fatalf("envelope is not valid base64: %v", err)
+	}
+
+	// Inner JSON should have expected fields.
+	var parsed map[string]any
+	if err := json.Unmarshal(jsonBytes, &parsed); err != nil {
+		t.Fatalf("envelope JSON is invalid: %v", err)
+	}
+	if parsed["k_id"] != "my-key" {
+		t.Errorf("k_id = %v, want %q", parsed["k_id"], "my-key")
+	}
+	if parsed["k_len"] != float64(64) {
+		t.Errorf("k_len = %v, want 64", parsed["k_len"])
+	}
+	if _, ok := parsed["m"]; !ok {
+		t.Error("envelope missing 'm' field")
 	}
 }
 
@@ -71,23 +105,18 @@ func TestMultipleMessagesInOrder(t *testing.T) {
 	copyFile(t, senderKey, receiverKey)
 
 	messages := []string{"aaa", "bbb", "ccc"}
-
-	type envelope struct {
-		keyLen     int
-		ciphertext []byte
-	}
-	var sent []envelope
+	var envelopes []string
 
 	for _, msg := range messages {
-		keyLen, ct, _, err := metadata.Encipher(senderKey, []byte(msg))
+		env, _, err := metadata.Encipher(senderKey, "k", []byte(msg))
 		if err != nil {
 			t.Fatalf("Encipher(%q): %v", msg, err)
 		}
-		sent = append(sent, envelope{keyLen, ct})
+		envelopes = append(envelopes, env)
 	}
 
-	for i, env := range sent {
-		pt, _, err := metadata.Decipher(receiverKey, env.keyLen, env.ciphertext)
+	for i, env := range envelopes {
+		pt, _, _, err := metadata.Decipher(receiverKey, env)
 		if err != nil {
 			t.Fatalf("Decipher message %d: %v", i, err)
 		}
@@ -103,24 +132,26 @@ func TestOutOfOrderDetected(t *testing.T) {
 	receiverKey := filepath.Join(dir, "receiver.key")
 	copyFile(t, senderKey, receiverKey)
 
-	// Send two messages.
-	keyLen1, ct1, _, err := metadata.Encipher(senderKey, []byte("first"))
+	env1, _, err := metadata.Encipher(senderKey, "k", []byte("first"))
 	if err != nil {
 		t.Fatalf("Encipher first: %v", err)
 	}
-	keyLen2, ct2, _, err := metadata.Encipher(senderKey, []byte("second"))
+	env2, _, err := metadata.Encipher(senderKey, "k", []byte("second"))
 	if err != nil {
 		t.Fatalf("Encipher second: %v", err)
 	}
 
 	// Receive second message first — should fail.
-	_, _, err = metadata.Decipher(receiverKey, keyLen2, ct2)
+	_, _, _, err = metadata.Decipher(receiverKey, env2)
 	if err == nil {
 		t.Fatal("expected error when deciphering out-of-order message")
 	}
+	if !strings.Contains(err.Error(), "key length mismatch") {
+		t.Errorf("expected key length mismatch error, got: %v", err)
+	}
 
 	// Receive first message — should succeed.
-	pt, _, err := metadata.Decipher(receiverKey, keyLen1, ct1)
+	pt, _, _, err := metadata.Decipher(receiverKey, env1)
 	if err != nil {
 		t.Fatalf("Decipher first: %v", err)
 	}
@@ -129,7 +160,7 @@ func TestOutOfOrderDetected(t *testing.T) {
 	}
 
 	// Now second message should succeed.
-	pt, _, err = metadata.Decipher(receiverKey, keyLen2, ct2)
+	pt, _, _, err = metadata.Decipher(receiverKey, env2)
 	if err != nil {
 		t.Fatalf("Decipher second: %v", err)
 	}
@@ -141,12 +172,21 @@ func TestOutOfOrderDetected(t *testing.T) {
 func TestMissingKeyFile(t *testing.T) {
 	missing := "/nonexistent/key.bin"
 
-	_, _, _, err := metadata.Encipher(missing, []byte("hello"))
+	_, _, err := metadata.Encipher(missing, "k", []byte("hello"))
 	if err == nil {
 		t.Error("Encipher: expected error for missing key file")
 	}
 
-	_, _, err = metadata.Decipher(missing, 100, []byte("hello"))
+	// Decipher needs a valid envelope even though the key file is missing.
+	// Craft a minimal valid envelope pointing at the missing file.
+	dir := t.TempDir()
+	senderKey := writeTestKey(t, dir, "sender.key", 16)
+	env, _, err := metadata.Encipher(senderKey, "k", []byte("hi"))
+	if err != nil {
+		t.Fatalf("setup Encipher: %v", err)
+	}
+
+	_, _, _, err = metadata.Decipher(missing, env)
 	if err == nil {
 		t.Error("Decipher: expected error for missing key file")
 	}
@@ -156,8 +196,25 @@ func TestKeyTooShort(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := writeTestKey(t, dir, "short.key", 3)
 
-	_, _, _, err := metadata.Encipher(keyFile, []byte("longer than key"))
+	_, _, err := metadata.Encipher(keyFile, "k", []byte("longer than key"))
 	if err == nil {
 		t.Error("expected error for key too short")
+	}
+}
+
+func TestDecipherInvalidEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := writeTestKey(t, dir, "test.key", 16)
+
+	// Not valid base64.
+	_, _, _, err := metadata.Decipher(keyFile, "!!!invalid!!!")
+	if err == nil {
+		t.Error("expected error for invalid base64")
+	}
+
+	// Valid base64 but not JSON.
+	_, _, _, err = metadata.Decipher(keyFile, base64.StdEncoding.EncodeToString([]byte("not json")))
+	if err == nil {
+		t.Error("expected error for invalid JSON")
 	}
 }

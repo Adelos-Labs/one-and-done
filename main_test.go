@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -117,19 +119,22 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	if envelope == "" {
 		t.Fatal("encipher produced empty output")
 	}
-	// Output should be keylen:base64
-	parts := strings.SplitN(envelope, ":", 2)
-	if len(parts) != 2 {
-		t.Fatalf("expected keylen:base64 format, got %q", envelope)
-	}
-	keyLen, err := strconv.Atoi(parts[0])
+
+	// Output should be a base64-encoded JSON envelope.
+	jsonBytes, err := base64.StdEncoding.DecodeString(envelope)
 	if err != nil {
-		t.Fatalf("invalid key length in output: %v", err)
+		t.Fatalf("envelope is not valid base64: %v", err)
 	}
-	if keyLen != 64 {
-		t.Errorf("key length = %d, want 64", keyLen)
+	var parsed map[string]any
+	if err := json.Unmarshal(jsonBytes, &parsed); err != nil {
+		t.Fatalf("envelope is not valid JSON: %v", err)
 	}
-	ciphertext := envelope
+	if parsed["k_len"] != float64(64) {
+		t.Errorf("k_len = %v, want 64", parsed["k_len"])
+	}
+	if parsed["k_id"] != "sender.key" {
+		t.Errorf("k_id = %v, want %q", parsed["k_id"], "sender.key")
+	}
 
 	// Verify sender's key was partially consumed.
 	senderRemaining, err := os.ReadFile(senderKey)
@@ -141,7 +146,7 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	}
 
 	// decipher with receiver's key
-	decCmd := exec.Command(bin, "decipher", receiverKey, ciphertext)
+	decCmd := exec.Command(bin, "decipher", receiverKey, envelope)
 	var decStdout bytes.Buffer
 	decCmd.Stdout = &decStdout
 	if err := decCmd.Run(); err != nil {
@@ -220,21 +225,12 @@ func TestCLI_MissingKeyFile(t *testing.T) {
 	bin := buildBinary(t)
 	missing := "/nonexistent/path/key.bin"
 
-	for _, tt := range []struct {
-		cmd  string
-		args []string
-	}{
-		{"encipher", []string{"encipher", missing, "hello"}},
-		{"decipher", []string{"decipher", missing, "100:aGVsbG8="}},
-	} {
-		out, err := exec.Command(bin, tt.args...).CombinedOutput()
-		if err == nil {
-			t.Errorf("otp %s with missing key file should fail", tt.cmd)
-			continue
-		}
-		if !strings.Contains(string(out), "error reading") {
-			t.Errorf("otp %s: expected key read error, got %q", tt.cmd, out)
-		}
+	out, err := exec.Command(bin, "encipher", missing, "hello").CombinedOutput()
+	if err == nil {
+		t.Error("otp encipher with missing key file should fail")
+	}
+	if !strings.Contains(string(out), "error reading") {
+		t.Errorf("otp encipher: expected key read error, got %q", out)
 	}
 }
 
@@ -246,21 +242,12 @@ func TestCLI_KeyTooShort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, tt := range []struct {
-		cmd  string
-		args []string
-	}{
-		{"encipher", []string{"encipher", keyFile, "hello world"}},
-		{"decipher", []string{"decipher", keyFile, "1:aGVsbG8gd29ybGQ="}},
-	} {
-		out, err := exec.Command(bin, tt.args...).CombinedOutput()
-		if err == nil {
-			t.Errorf("otp %s with short key should fail", tt.cmd)
-			continue
-		}
-		if !strings.Contains(string(out), "key too short") {
-			t.Errorf("otp %s: expected key too short error, got %q", tt.cmd, out)
-		}
+	out, err := exec.Command(bin, "encipher", keyFile, "hello world").CombinedOutput()
+	if err == nil {
+		t.Error("otp encipher with short key should fail")
+	}
+	if !strings.Contains(string(out), "key too short") {
+		t.Errorf("otp encipher: expected key too short error, got %q", out)
 	}
 }
 
@@ -298,7 +285,7 @@ func TestCLI_GenkeyWriteFailure(t *testing.T) {
 	}
 }
 
-func TestCLI_DecipherInvalidBase64(t *testing.T) {
+func TestCLI_DecipherInvalidEnvelope(t *testing.T) {
 	bin := buildBinary(t)
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "test.key")
@@ -306,28 +293,11 @@ func TestCLI_DecipherInvalidBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command(bin, "decipher", keyFile, "3:not-valid-base64!!!").CombinedOutput()
+	out, err := exec.Command(bin, "decipher", keyFile, "!!!not-base64!!!").CombinedOutput()
 	if err == nil {
-		t.Fatal("expected failure for invalid base64")
+		t.Fatal("expected failure for invalid envelope")
 	}
-	if !strings.Contains(string(out), "invalid base64") {
-		t.Errorf("unexpected error message: %s", out)
-	}
-}
-
-func TestCLI_DecipherInvalidFormat(t *testing.T) {
-	bin := buildBinary(t)
-	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "test.key")
-	if err := os.WriteFile(keyFile, []byte("key"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := exec.Command(bin, "decipher", keyFile, "no-colon-here").CombinedOutput()
-	if err == nil {
-		t.Fatal("expected failure for missing keylen prefix")
-	}
-	if !strings.Contains(string(out), "invalid message format") {
+	if !strings.Contains(string(out), "invalid envelope") {
 		t.Errorf("unexpected error message: %s", out)
 	}
 }

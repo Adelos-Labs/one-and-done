@@ -1,12 +1,11 @@
 package main
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/adelos-labs/one-and-done/cliutil"
 	"github.com/adelos-labs/one-and-done/keymanagement"
@@ -36,35 +35,20 @@ func main() {
 	}
 }
 
-func encipher(keyFile, message string) {
-	plaintext := []byte(message)
+func encipher(keyFile, msg string) {
+	keyID := filepath.Base(keyFile)
 
-	keyLen, cipher, remaining, err := metadata.Encipher(keyFile, plaintext)
+	envelope, remaining, err := metadata.Encipher(keyFile, keyID, []byte(msg))
 	if err != nil {
 		cliutil.Die("%v", err)
 	}
 
-	fmt.Printf("%d:%s\n", keyLen, base64.StdEncoding.EncodeToString(cipher))
+	fmt.Println(envelope)
 	printKeyStatus(keyFile, remaining)
 }
 
-func decipher(keyFile, encoded string) {
-	parts := strings.SplitN(encoded, ":", 2)
-	if len(parts) != 2 {
-		cliutil.Die("invalid message format: expected keylen:base64")
-	}
-
-	keyLen, err := strconv.Atoi(parts[0])
-	if err != nil {
-		cliutil.Die("invalid key length %q: %v", parts[0], err)
-	}
-
-	cipher, err := base64.StdEncoding.DecodeString(parts[1])
-	if err != nil {
-		cliutil.Die("invalid base64: %v", err)
-	}
-
-	plaintext, remaining, err := metadata.Decipher(keyFile, keyLen, cipher)
+func decipher(keyFile, envelope string) {
+	plaintext, _, remaining, err := metadata.Decipher(keyFile, envelope)
 	if err != nil {
 		cliutil.Die("%v", err)
 	}
