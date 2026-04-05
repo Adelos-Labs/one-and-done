@@ -83,8 +83,13 @@ func TestCLI_PartialArgs(t *testing.T) {
 func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	bin := buildBinary(t)
 	dir := t.TempDir()
-	senderKey := filepath.Join(dir, "sender.key")
-	receiverKey := filepath.Join(dir, "receiver.key")
+	// Both parties use the same base filename (shared key ID).
+	senderDir := filepath.Join(dir, "sender")
+	receiverDir := filepath.Join(dir, "receiver")
+	os.MkdirAll(senderDir, 0700)
+	os.MkdirAll(receiverDir, 0700)
+	senderKey := filepath.Join(senderDir, "shared.key")
+	receiverKey := filepath.Join(receiverDir, "shared.key")
 	message := "hello world"
 
 	// genkey
@@ -132,8 +137,8 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	if parsed["k_len"] != float64(64) {
 		t.Errorf("k_len = %v, want 64", parsed["k_len"])
 	}
-	if parsed["k_id"] != "sender.key" {
-		t.Errorf("k_id = %v, want %q", parsed["k_id"], "sender.key")
+	if parsed["k_id"] != "shared.key" {
+		t.Errorf("k_id = %v, want %q", parsed["k_id"], "shared.key")
 	}
 
 	// Verify sender's key was partially consumed.
@@ -302,11 +307,62 @@ func TestCLI_DecipherInvalidEnvelope(t *testing.T) {
 	}
 }
 
+func TestCLI_KeyIDMismatch(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	senderDir := filepath.Join(dir, "sender")
+	receiverDir := filepath.Join(dir, "receiver")
+	os.MkdirAll(senderDir, 0700)
+	os.MkdirAll(receiverDir, 0700)
+	senderKey := filepath.Join(senderDir, "shared.key")
+	receiverKey := filepath.Join(receiverDir, "different.key")
+
+	// Generate key and copy to receiver under a different name.
+	genOut, err := exec.Command(bin, "genkey", senderKey, "64").CombinedOutput()
+	if err != nil {
+		t.Fatalf("genkey: %v\n%s", err, genOut)
+	}
+	keyData, _ := os.ReadFile(senderKey)
+	os.WriteFile(receiverKey, keyData, 0600)
+
+	// Encipher with sender's key (key ID = "shared.key").
+	encCmd := exec.Command(bin, "encipher", senderKey, "hello")
+	var encOut bytes.Buffer
+	encCmd.Stdout = &encOut
+	if err := encCmd.Run(); err != nil {
+		t.Fatalf("encipher: %v", err)
+	}
+	envelope := strings.TrimSpace(encOut.String())
+
+	// Decipher with receiver's differently-named key — should fail.
+	decOut, err := exec.Command(bin, "decipher", receiverKey, envelope).CombinedOutput()
+	if err == nil {
+		t.Fatal("expected error for key ID mismatch")
+	}
+	if !strings.Contains(string(decOut), "key ID mismatch") {
+		t.Errorf("expected key ID mismatch error, got: %s", decOut)
+	}
+
+	// Receiver's key file should be untouched.
+	info, err := os.Stat(receiverKey)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Size() != 64 {
+		t.Errorf("receiver key size = %d, want 64 (key was consumed despite mismatch)", info.Size())
+	}
+}
+
 func TestCLI_OutOfOrderDetected(t *testing.T) {
 	bin := buildBinary(t)
 	dir := t.TempDir()
-	senderKey := filepath.Join(dir, "sender.key")
-	receiverKey := filepath.Join(dir, "receiver.key")
+	// Both parties use the same base filename (shared key ID).
+	senderDir := filepath.Join(dir, "sender")
+	receiverDir := filepath.Join(dir, "receiver")
+	os.MkdirAll(senderDir, 0700)
+	os.MkdirAll(receiverDir, 0700)
+	senderKey := filepath.Join(senderDir, "shared.key")
+	receiverKey := filepath.Join(receiverDir, "shared.key")
 
 	// Generate key and copy to receiver.
 	out, err := exec.Command(bin, "genkey", senderKey, "64").CombinedOutput()

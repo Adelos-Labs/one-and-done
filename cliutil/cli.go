@@ -9,13 +9,16 @@ const helpText = `Usage:
   otp help
   otp genkey <key-file> <length-in-bytes>
   otp encipher <key-file> <message>
-  otp decipher <key-file> <base64-ciphertext>
+  otp decipher <key-file> <envelope>
 
 Commands:
   help       Show this help text
   genkey     Generate a random key and write it to the given key file
-  encipher   Encrypt a message with the given key file and print base64 ciphertext
-  decipher   Decrypt a base64 ciphertext with the given key file and print plaintext
+  encipher   Encrypt a message and print a base64-encoded envelope
+  decipher   Decrypt an envelope and print the plaintext
+
+The envelope is a base64-encoded JSON blob containing the ciphertext,
+key ID (derived from the key file name), and key length (for ordering).
 
 Key bytes are consumed after each encipher/decipher operation. Do not run
 multiple operations against the same key file concurrently.

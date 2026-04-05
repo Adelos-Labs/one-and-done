@@ -51,32 +51,41 @@ func Encipher(keyFile, keyID string, plaintext []byte) (string, int, error) {
 }
 
 // Decipher decodes a base64-encoded JSON envelope and decrypts the message.
-// It validates that the envelope's key length matches the current key file,
-// refusing to decrypt if messages are out of order.
-func Decipher(keyFile, encoded string) (plaintext []byte, keyID string, remaining int, err error) {
+// expectedKeyID is the key ID the caller expects; if the envelope's key ID
+// does not match, decryption is refused before any key material is consumed.
+// It also validates that the envelope's key length matches the current key
+// file, refusing to decrypt if messages are out of order.
+func Decipher(keyFile, expectedKeyID, encoded string) (plaintext []byte, remaining int, err error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("invalid envelope encoding: %w", err)
+		return nil, 0, fmt.Errorf("invalid envelope encoding: %w", err)
 	}
 
 	var env envelope
 	if err := json.Unmarshal(jsonBytes, &env); err != nil {
-		return nil, "", 0, fmt.Errorf("invalid envelope format: %w", err)
+		return nil, 0, fmt.Errorf("invalid envelope format: %w", err)
+	}
+
+	if env.KeyID != expectedKeyID {
+		return nil, 0, fmt.Errorf(
+			"key ID mismatch: message has %q but expected %q",
+			env.KeyID, expectedKeyID,
+		)
 	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(env.Message)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("invalid ciphertext encoding: %w", err)
+		return nil, 0, fmt.Errorf("invalid ciphertext encoding: %w", err)
 	}
 
 	info, err := os.Stat(keyFile)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
+		return nil, 0, fmt.Errorf("error reading key file %s: %w", keyFile, err)
 	}
 	currentLen := int(info.Size())
 
 	if currentLen != env.KeyLen {
-		return nil, "", 0, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"key length mismatch: message expects %d bytes but key file has %d bytes (messages may be out of order)",
 			env.KeyLen, currentLen,
 		)
@@ -84,14 +93,14 @@ func Decipher(keyFile, encoded string) (plaintext []byte, keyID string, remainin
 
 	key, remaining, err := keymanagement.ConsumeKey(keyFile, len(ciphertext))
 	if err != nil {
-		return nil, "", 0, err
+		return nil, 0, err
 	}
 	defer clear(key)
 
 	plaintext, err = message.Decipher(ciphertext, key)
 	if err != nil {
-		return nil, "", 0, err
+		return nil, 0, err
 	}
 
-	return plaintext, env.KeyID, remaining, nil
+	return plaintext, remaining, nil
 }

@@ -52,15 +52,12 @@ func TestRoundtrip(t *testing.T) {
 		t.Errorf("remaining = %d, want %d", remaining, 64-len(msg))
 	}
 
-	plaintext, keyID, remaining, err := metadata.Decipher(receiverKey, envelope)
+	plaintext, remaining, err := metadata.Decipher(receiverKey, "test-key", envelope)
 	if err != nil {
 		t.Fatalf("Decipher: %v", err)
 	}
 	if string(plaintext) != "hello world" {
 		t.Errorf("plaintext = %q, want %q", plaintext, "hello world")
-	}
-	if keyID != "test-key" {
-		t.Errorf("keyID = %q, want %q", keyID, "test-key")
 	}
 	if remaining != 64-len(msg) {
 		t.Errorf("remaining = %d, want %d", remaining, 64-len(msg))
@@ -116,7 +113,7 @@ func TestMultipleMessagesInOrder(t *testing.T) {
 	}
 
 	for i, env := range envelopes {
-		pt, _, _, err := metadata.Decipher(receiverKey, env)
+		pt, _, err := metadata.Decipher(receiverKey, "k", env)
 		if err != nil {
 			t.Fatalf("Decipher message %d: %v", i, err)
 		}
@@ -142,7 +139,7 @@ func TestOutOfOrderDetected(t *testing.T) {
 	}
 
 	// Receive second message first — should fail.
-	_, _, _, err = metadata.Decipher(receiverKey, env2)
+	_, _, err = metadata.Decipher(receiverKey, "k", env2)
 	if err == nil {
 		t.Fatal("expected error when deciphering out-of-order message")
 	}
@@ -151,7 +148,7 @@ func TestOutOfOrderDetected(t *testing.T) {
 	}
 
 	// Receive first message — should succeed.
-	pt, _, _, err := metadata.Decipher(receiverKey, env1)
+	pt, _, err := metadata.Decipher(receiverKey, "k", env1)
 	if err != nil {
 		t.Fatalf("Decipher first: %v", err)
 	}
@@ -160,12 +157,51 @@ func TestOutOfOrderDetected(t *testing.T) {
 	}
 
 	// Now second message should succeed.
-	pt, _, _, err = metadata.Decipher(receiverKey, env2)
+	pt, _, err = metadata.Decipher(receiverKey, "k", env2)
 	if err != nil {
 		t.Fatalf("Decipher second: %v", err)
 	}
 	if string(pt) != "second" {
 		t.Errorf("got %q, want %q", pt, "second")
+	}
+}
+
+func TestKeyIDMismatchRejectsBeforeConsuming(t *testing.T) {
+	dir := t.TempDir()
+	senderKey := writeTestKey(t, dir, "sender.key", 64)
+	receiverKey := filepath.Join(dir, "receiver.key")
+	copyFile(t, senderKey, receiverKey)
+
+	envelope, _, err := metadata.Encipher(senderKey, "alice-bob", []byte("hello"))
+	if err != nil {
+		t.Fatalf("Encipher: %v", err)
+	}
+
+	// Decipher with wrong key ID — should fail.
+	_, _, err = metadata.Decipher(receiverKey, "alice-charlie", envelope)
+	if err == nil {
+		t.Fatal("expected error for key ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "key ID mismatch") {
+		t.Errorf("expected key ID mismatch error, got: %v", err)
+	}
+
+	// Key file should be untouched — no bytes consumed.
+	info, err := os.Stat(receiverKey)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Size() != 64 {
+		t.Errorf("key file size = %d, want 64 (key material was consumed despite mismatch)", info.Size())
+	}
+
+	// Decipher with correct key ID should still work.
+	pt, _, err := metadata.Decipher(receiverKey, "alice-bob", envelope)
+	if err != nil {
+		t.Fatalf("Decipher with correct key ID: %v", err)
+	}
+	if string(pt) != "hello" {
+		t.Errorf("plaintext = %q, want %q", pt, "hello")
 	}
 }
 
@@ -178,7 +214,6 @@ func TestMissingKeyFile(t *testing.T) {
 	}
 
 	// Decipher needs a valid envelope even though the key file is missing.
-	// Craft a minimal valid envelope pointing at the missing file.
 	dir := t.TempDir()
 	senderKey := writeTestKey(t, dir, "sender.key", 16)
 	env, _, err := metadata.Encipher(senderKey, "k", []byte("hi"))
@@ -186,7 +221,7 @@ func TestMissingKeyFile(t *testing.T) {
 		t.Fatalf("setup Encipher: %v", err)
 	}
 
-	_, _, _, err = metadata.Decipher(missing, env)
+	_, _, err = metadata.Decipher(missing, "k", env)
 	if err == nil {
 		t.Error("Decipher: expected error for missing key file")
 	}
@@ -207,14 +242,72 @@ func TestDecipherInvalidEnvelope(t *testing.T) {
 	keyFile := writeTestKey(t, dir, "test.key", 16)
 
 	// Not valid base64.
-	_, _, _, err := metadata.Decipher(keyFile, "!!!invalid!!!")
+	_, _, err := metadata.Decipher(keyFile, "k", "!!!invalid!!!")
 	if err == nil {
 		t.Error("expected error for invalid base64")
 	}
 
 	// Valid base64 but not JSON.
-	_, _, _, err = metadata.Decipher(keyFile, base64.StdEncoding.EncodeToString([]byte("not json")))
+	_, _, err = metadata.Decipher(keyFile, "k", base64.StdEncoding.EncodeToString([]byte("not json")))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestDecipherMissingOrEmptyKeyID(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := writeTestKey(t, dir, "test.key", 16)
+
+	makeEnvelope := func(jsonStr string) string {
+		return base64.StdEncoding.EncodeToString([]byte(jsonStr))
+	}
+
+	// Envelope with k_id omitted entirely.
+	env := makeEnvelope(`{"m":"aGk=","k_len":16}`)
+	_, _, err := metadata.Decipher(keyFile, "test.key", env)
+	if err == nil {
+		t.Error("expected error for missing k_id")
+	}
+	if !strings.Contains(err.Error(), "key ID mismatch") {
+		t.Errorf("expected key ID mismatch error, got: %v", err)
+	}
+
+	// Envelope with k_id set to empty string.
+	env = makeEnvelope(`{"m":"aGk=","k_id":"","k_len":16}`)
+	_, _, err = metadata.Decipher(keyFile, "test.key", env)
+	if err == nil {
+		t.Error("expected error for empty k_id")
+	}
+	if !strings.Contains(err.Error(), "key ID mismatch") {
+		t.Errorf("expected key ID mismatch error, got: %v", err)
+	}
+
+	// Key file should be untouched in both cases.
+	info, _ := os.Stat(keyFile)
+	if info.Size() != 16 {
+		t.Errorf("key file size = %d, want 16 (key was consumed despite invalid envelope)", info.Size())
+	}
+}
+
+func TestDecipherCorruptedMessageField(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := writeTestKey(t, dir, "test.key", 16)
+
+	// Envelope with correct k_id but m is not valid base64.
+	raw := `{"m":"!!!not-base64!!!","k_id":"test.key","k_len":16}`
+	env := base64.StdEncoding.EncodeToString([]byte(raw))
+
+	_, _, err := metadata.Decipher(keyFile, "test.key", env)
+	if err == nil {
+		t.Fatal("expected error for corrupted m field")
+	}
+	if !strings.Contains(err.Error(), "invalid ciphertext encoding") {
+		t.Errorf("expected ciphertext encoding error, got: %v", err)
+	}
+
+	// Key file should be untouched — error occurs before consumption.
+	info, _ := os.Stat(keyFile)
+	if info.Size() != 16 {
+		t.Errorf("key file size = %d, want 16 (key was consumed despite bad ciphertext)", info.Size())
 	}
 }

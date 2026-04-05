@@ -48,7 +48,9 @@ func encipher(keyFile, msg string) {
 }
 
 func decipher(keyFile, envelope string) {
-	plaintext, _, remaining, err := metadata.Decipher(keyFile, envelope)
+	keyID := filepath.Base(keyFile)
+
+	plaintext, remaining, err := metadata.Decipher(keyFile, keyID, envelope)
 	if err != nil {
 		cliutil.Die("%v", err)
 	}
