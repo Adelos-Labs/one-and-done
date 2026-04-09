@@ -24,17 +24,22 @@ func GenKey(length int) ([]byte, error) {
 }
 
 func ReadKey(path string, requiredLength int) ([]byte, error) {
-	key, err := os.ReadFile(path)
+	full, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("error reading %s: %w", path, err)
 	}
 	if requiredLength < 0 {
+		clear(full)
 		return nil, fmt.Errorf("length must be non-negative, got %d", requiredLength)
 	}
-	if len(key) < requiredLength {
-		return nil, fmt.Errorf("key too short: need %d bytes, have %d", requiredLength, len(key))
+	if len(full) < requiredLength {
+		clear(full)
+		return nil, fmt.Errorf("key too short: need %d bytes, have %d", requiredLength, len(full))
 	}
-	return key[:requiredLength], nil
+	out := make([]byte, requiredLength)
+	copy(out, full[:requiredLength])
+	clear(full)
+	return out, nil
 }
 
 // ConsumeKey reads length bytes from the front of the key file, securely
@@ -47,9 +52,11 @@ func ConsumeKey(path string, length int) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("error reading %s: %w", path, err)
 	}
 	if length < 0 {
+		clear(full)
 		return nil, 0, fmt.Errorf("length must be non-negative, got %d", length)
 	}
 	if len(full) < length {
+		clear(full)
 		return nil, 0, fmt.Errorf("key too short: need %d bytes, have %d", length, len(full))
 	}
 
@@ -74,6 +81,10 @@ func secureRewrite(path string, full []byte, consumed int) error {
 	tail := make([]byte, remaining)
 	copy(tail, full[consumed:])
 
+	// Clear the original buffer as soon as the tail is copied out.
+	// Every exit path below only needs tail, not full.
+	clear(full)
+
 	f, err := os.OpenFile(path, os.O_WRONLY, 0600)
 	if err != nil {
 		clear(tail)
@@ -82,6 +93,7 @@ func secureRewrite(path string, full []byte, consumed int) error {
 	defer f.Close()
 
 	// Overwrite entire file with zeros to destroy used key material on disk.
+	// len(full) is still valid after clear — only the contents are zeroed.
 	if err := writeFull(f, make([]byte, len(full))); err != nil {
 		clear(tail)
 		return fmt.Errorf("error zeroing key %s: %w", path, err)
@@ -90,9 +102,6 @@ func secureRewrite(path string, full []byte, consumed int) error {
 		clear(tail)
 		return fmt.Errorf("error syncing key %s: %w", path, err)
 	}
-
-	// Zero the original in-memory buffer.
-	clear(full)
 
 	// From this point, the file on disk is all zeros. Any failure must
 	// remove it so stale zeros are never mistaken for valid key material.

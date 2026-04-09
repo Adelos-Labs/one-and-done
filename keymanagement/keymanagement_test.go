@@ -113,6 +113,37 @@ func TestReadKey_NegativeLength(t *testing.T) {
 	}
 }
 
+func TestReadKey_ReturnsIndependentCopy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "copy.key")
+	full := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22}
+	if err := os.WriteFile(path, full, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read fewer bytes than the file contains.
+	got, err := ReadKey(path, 3)
+	if err != nil {
+		t.Fatalf("ReadKey: %v", err)
+	}
+
+	// The returned slice must be an independent allocation, not a subslice
+	// of the file buffer. Its capacity should equal the requested length so
+	// that clear(got) zeros all key material that was read.
+	if cap(got) != 3 {
+		t.Errorf("cap(result) = %d, want 3 (should be an independent copy, not a subslice of the file buffer)", cap(got))
+	}
+
+	// Clearing the returned slice should leave no residual key material
+	// accessible via the same backing array.
+	clear(got)
+	for i, b := range got[:cap(got)] {
+		if b != 0 {
+			t.Errorf("byte %d = %02x after clear, want 0x00", i, b)
+		}
+	}
+}
+
 func TestWriteKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "written.key")
@@ -262,6 +293,52 @@ func TestConsumeKey_NegativeLength(t *testing.T) {
 	_, _, err := ConsumeKey(path, -1)
 	if err == nil {
 		t.Fatal("expected error for negative length")
+	}
+}
+
+// TestSecureRewrite_ClearsFullBufferEarly verifies that secureRewrite zeros
+// the full in-memory key buffer before any I/O, so that failures during
+// file operations don't leave key material live in memory.
+func TestSecureRewrite_ClearsFullBufferEarly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rewrite.key")
+	original := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE}
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make a copy that secureRewrite will receive.
+	// We retain a reference to observe whether it gets cleared.
+	full := make([]byte, len(original))
+	copy(full, original)
+
+	// Consume first 2 bytes; secureRewrite should clear full before
+	// doing any disk I/O.
+	err := secureRewrite(path, full, 2)
+	if err != nil {
+		t.Fatalf("secureRewrite: %v", err)
+	}
+
+	// full should be entirely zeroed.
+	for i, b := range full {
+		if b != 0 {
+			t.Errorf("full[%d] = %02x after secureRewrite, want 0x00", i, b)
+		}
+	}
+}
+
+// TestSecureRewrite_ClearsFullOnOpenFailure verifies that full is zeroed
+// even when the file cannot be opened for rewriting.
+func TestSecureRewrite_ClearsFullOnOpenFailure(t *testing.T) {
+	full := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+
+	// Pass a nonexistent path so OpenFile fails.
+	_ = secureRewrite("/nonexistent/path/key.bin", full, 2)
+
+	for i, b := range full {
+		if b != 0 {
+			t.Errorf("full[%d] = %02x after failed secureRewrite, want 0x00", i, b)
+		}
 	}
 }
 

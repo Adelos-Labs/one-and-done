@@ -141,13 +141,16 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 		t.Errorf("k_id = %v, want %q", parsed["k_id"], "shared.key")
 	}
 
+	// Each message consumes len(message) + 32 bytes (MAC key).
+	consumed := len(message) + 32
+
 	// Verify sender's key was partially consumed.
 	senderRemaining, err := os.ReadFile(senderKey)
 	if err != nil {
 		t.Fatalf("read sender key after encipher: %v", err)
 	}
-	if len(senderRemaining) != 64-len(message) {
-		t.Errorf("sender key has %d bytes remaining, want %d", len(senderRemaining), 64-len(message))
+	if len(senderRemaining) != 64-consumed {
+		t.Errorf("sender key has %d bytes remaining, want %d", len(senderRemaining), 64-consumed)
 	}
 
 	// decipher with receiver's key
@@ -167,8 +170,8 @@ func TestCLI_GenkeyEncipherDecipher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read receiver key after decipher: %v", err)
 	}
-	if len(receiverRemaining) != 64-len(message) {
-		t.Errorf("receiver key has %d bytes remaining, want %d", len(receiverRemaining), 64-len(message))
+	if len(receiverRemaining) != 64-consumed {
+		t.Errorf("receiver key has %d bytes remaining, want %d", len(receiverRemaining), 64-consumed)
 	}
 }
 
@@ -178,8 +181,9 @@ func TestCLI_FullKeyConsumption(t *testing.T) {
 	keyFile := filepath.Join(dir, "exact.key")
 	message := "hello"
 
-	// Generate a key exactly the length of the message.
-	out, err := exec.Command(bin, "genkey", keyFile, strconv.Itoa(len(message))).CombinedOutput()
+	// Generate a key exactly the length of the message + MAC overhead.
+	exactLen := len(message) + 32
+	out, err := exec.Command(bin, "genkey", keyFile, strconv.Itoa(exactLen)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("genkey: %v\n%s", err, out)
 	}
@@ -364,8 +368,8 @@ func TestCLI_OutOfOrderDetected(t *testing.T) {
 	senderKey := filepath.Join(senderDir, "shared.key")
 	receiverKey := filepath.Join(receiverDir, "shared.key")
 
-	// Generate key and copy to receiver.
-	out, err := exec.Command(bin, "genkey", senderKey, "64").CombinedOutput()
+	// Key must fit two messages: "first"(5+32) + "second"(6+32) = 75 bytes.
+	out, err := exec.Command(bin, "genkey", senderKey, "128").CombinedOutput()
 	if err != nil {
 		t.Fatalf("genkey: %v\n%s", err, out)
 	}

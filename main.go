@@ -78,6 +78,8 @@ func genkey(keyFile, lengthStr string) {
 		cliutil.Die("error generating key: %v", err)
 	}
 
+	defer clear(key)
+
 	if err := keymanagement.WriteKey(keyFile, key); err != nil {
 		if errors.Is(err, keymanagement.ErrKeyExists) {
 			cliutil.Die("key file already exists, refusing to overwrite: %s", keyFile)
